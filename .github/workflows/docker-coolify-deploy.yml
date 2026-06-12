@@ -73,7 +73,6 @@ env:
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
   GHCR_REGISTRY: ghcr.io
   CHECKOUT_FETCH_DEPTH: 1
-  DEPLOY_BRANCH: refs/heads/${{ inputs.deploy_branch }}
 
 jobs:
   build-and-push:
@@ -164,7 +163,7 @@ jobs:
 
   cleanup:
     needs: build-and-push
-    if: github.ref == env.DEPLOY_BRANCH
+    if: github.ref == format('refs/heads/{0}', inputs.deploy_branch)
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -178,7 +177,7 @@ jobs:
 
   deploy:
     needs: build-and-push
-    if: github.ref == env.DEPLOY_BRANCH
+    if: github.ref == format('refs/heads/{0}', inputs.deploy_branch)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
