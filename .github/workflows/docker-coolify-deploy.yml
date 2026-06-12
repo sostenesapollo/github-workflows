@@ -16,16 +16,6 @@ on:
         required: false
         type: string
         default: ''
-      coolify_api_url:
-        description: URL da API de deploy do Coolify
-        required: false
-        type: string
-        default: 'https://coolify.pedegas.com/api/v1/deploy'
-      ntfy_url:
-        description: URL do tópico ntfy.sh
-        required: false
-        type: string
-        default: 'https://ntfy.sh/sostenes_alertas'
       deploy_branch:
         description: Branch que dispara cleanup e deploy
         required: false
@@ -59,16 +49,20 @@ on:
     secrets:
       COOLIFY_TOKEN:
         required: false
+      COOLIFY_API_URL:
+        required: false
+      NTFY_URL:
+        required: false
       PRODUCTION_ENV:
         required: false
 
 env:
   APP_NAME: ${{ inputs.app_name }}
   REPO_NAME: ${{ inputs.repo_name }}
-  NTFY_URL: ${{ inputs.ntfy_url }}
+  NTFY_URL: ${{ secrets.NTFY_URL }}
   COOLIFY_DEPLOY_UUID: ${{ inputs.coolify_deploy_uuid }}
   COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-  COOLIFY_API_URL: ${{ inputs.coolify_api_url }}
+  COOLIFY_API_URL: ${{ secrets.COOLIFY_API_URL }}
   GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ inputs.repo_name }}
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
   GHCR_REGISTRY: ghcr.io
@@ -87,6 +81,10 @@ jobs:
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
+          if [ -z "$NTFY_URL" ]; then
+            echo "NTFY_URL não configurado — pulando notificação."
+            exit 0
+          fi
           MSG="${COMMIT_MSG:-${{ github.sha }}}"
           BODY=$(printf 'Step: build-and-push (iniciado)\nCommit: %s\nRun: %s' "$MSG" "$RUN_URL")
           curl -sf \
@@ -140,6 +138,7 @@ jobs:
         if: success()
         continue-on-error: true
         run: |
+          if [ -z "$NTFY_URL" ]; then exit 0; fi
           MSG=$(git log -1 --pretty=%B)
           BODY=$(printf 'Step: build-and-push (concluído)\nCommit: %s' "$MSG")
           curl -sf \
@@ -152,6 +151,7 @@ jobs:
         if: failure()
         continue-on-error: true
         run: |
+          if [ -z "$NTFY_URL" ]; then exit 0; fi
           MSG=$(git log -1 --pretty=%B)
           BODY=$(printf 'Step: build-and-push (falhou)\nCommit: %s\nRun: %s' "$MSG" "$RUN_URL")
           curl -sf \
@@ -188,6 +188,7 @@ jobs:
       - name: Notify — deploy iniciado
         continue-on-error: true
         run: |
+          if [ -z "$NTFY_URL" ]; then exit 0; fi
           MSG=$(git log -1 --pretty=%B)
           BODY=$(printf 'Step: deploy (iniciado)\nCommit: %s' "$MSG")
           curl -sf \
@@ -197,8 +198,8 @@ jobs:
 
       - name: Trigger Coolify
         run: |
-          if [ -z "$COOLIFY_DEPLOY_UUID" ] || [ -z "$COOLIFY_TOKEN" ]; then
-            echo "COOLIFY_DEPLOY_UUID ou COOLIFY_TOKEN não configurados — pulando deploy."
+          if [ -z "$COOLIFY_DEPLOY_UUID" ] || [ -z "$COOLIFY_TOKEN" ] || [ -z "$COOLIFY_API_URL" ]; then
+            echo "COOLIFY_DEPLOY_UUID, COOLIFY_TOKEN ou COOLIFY_API_URL não configurados — pulando deploy."
             exit 0
           fi
           curl -sf -X GET \
@@ -209,6 +210,7 @@ jobs:
         if: success()
         continue-on-error: true
         run: |
+          if [ -z "$NTFY_URL" ]; then exit 0; fi
           MSG=$(git log -1 --pretty=%B)
           BODY=$(printf 'Step: deploy (Coolify disparado)\nCommit: %s' "$MSG")
           curl -sf \
@@ -221,6 +223,7 @@ jobs:
         if: failure()
         continue-on-error: true
         run: |
+          if [ -z "$NTFY_URL" ]; then exit 0; fi
           MSG=$(git log -1 --pretty=%B)
           BODY=$(printf 'Step: deploy (falhou)\nCommit: %s\nRun: %s' "$MSG" "$RUN_URL")
           curl -sf \
