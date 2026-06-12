@@ -1,0 +1,232 @@
+name: Docker build + GHCR + Coolify deploy
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: Nome exibido nas notificações
+        required: true
+        type: string
+      repo_name:
+        description: Nome do package no GHCR (ex. pedegas-3)
+        required: true
+        type: string
+      coolify_deploy_uuid:
+        description: UUID do deploy no Coolify
+        required: false
+        type: string
+        default: ''
+      coolify_api_url:
+        description: URL da API de deploy do Coolify
+        required: false
+        type: string
+        default: 'https://coolify.pedegas.com/api/v1/deploy'
+      ntfy_url:
+        description: URL do tópico ntfy.sh
+        required: false
+        type: string
+        default: 'https://ntfy.sh/sostenes_alertas'
+      deploy_branch:
+        description: Branch que dispara cleanup e deploy
+        required: false
+        type: string
+        default: 'master'
+      dockerfile:
+        description: Caminho do Dockerfile
+        required: false
+        type: string
+        default: './Dockerfile'
+      docker_context:
+        description: Contexto do build Docker
+        required: false
+        type: string
+        default: '.'
+      create_env_production:
+        description: Criar .env.production a partir de PRODUCTION_ENV
+        required: false
+        type: boolean
+        default: true
+      platforms:
+        description: Plataformas Docker (ex. linux/amd64)
+        required: false
+        type: string
+        default: 'linux/amd64'
+      min_package_versions_to_keep:
+        description: Versões mínimas a manter no cleanup do GHCR
+        required: false
+        type: number
+        default: 2
+    secrets:
+      COOLIFY_TOKEN:
+        required: false
+      PRODUCTION_ENV:
+        required: false
+
+env:
+  APP_NAME: ${{ inputs.app_name }}
+  REPO_NAME: ${{ inputs.repo_name }}
+  NTFY_URL: ${{ inputs.ntfy_url }}
+  COOLIFY_DEPLOY_UUID: ${{ inputs.coolify_deploy_uuid }}
+  COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+  COOLIFY_API_URL: ${{ inputs.coolify_api_url }}
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ inputs.repo_name }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  GHCR_REGISTRY: ghcr.io
+  CHECKOUT_FETCH_DEPTH: 1
+  DEPLOY_BRANCH: refs/heads/${{ inputs.deploy_branch }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Notify — iniciando build
+        continue-on-error: true
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          MSG="${COMMIT_MSG:-${{ github.sha }}}"
+          BODY=$(printf 'Step: build-and-push (iniciado)\nCommit: %s\nRun: %s' "$MSG" "$RUN_URL")
+          curl -sf \
+            -H "Title: ${{ env.APP_NAME }} CI — Iniciando build" \
+            --data-binary "$BODY" \
+            "$NTFY_URL" || true
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ env.CHECKOUT_FETCH_DEPTH }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create .env.production for build
+        if: inputs.create_env_production
+        env:
+          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+        run: |
+          if [ -n "$PRODUCTION_ENV" ]; then
+            printf '%s\n' "$PRODUCTION_ENV" > .env.production
+            echo "Using secrets.PRODUCTION_ENV for build ($(grep -c '^NEXT_PUBLIC_' .env.production || true) NEXT_PUBLIC_* vars)"
+          else
+            echo "secrets.PRODUCTION_ENV not set — building without .env.production"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.docker_context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.GHCR_IMAGE }}:latest
+            ${{ env.GHCR_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: ${{ inputs.platforms }}
+          provenance: false
+          sbom: false
+
+      - name: Notify — build concluído
+        if: success()
+        continue-on-error: true
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          BODY=$(printf 'Step: build-and-push (concluído)\nCommit: %s' "$MSG")
+          curl -sf \
+            -H "Title: ${{ env.APP_NAME }} CI — Build OK" \
+            -H "Tags: white_check_mark" \
+            --data-binary "$BODY" \
+            "$NTFY_URL" || true
+
+      - name: Notify — build falhou
+        if: failure()
+        continue-on-error: true
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          BODY=$(printf 'Step: build-and-push (falhou)\nCommit: %s\nRun: %s' "$MSG" "$RUN_URL")
+          curl -sf \
+            -H "Title: ${{ env.APP_NAME }} CI — Build FALHOU" \
+            -H "Priority: high" \
+            -H "Tags: x" \
+            --data-binary "$BODY" \
+            "$NTFY_URL" || true
+
+  cleanup:
+    needs: build-and-push
+    if: github.ref == env.DEPLOY_BRANCH
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ inputs.repo_name }}
+          package-type: container
+          min-versions-to-keep: ${{ inputs.min_package_versions_to_keep }}
+          delete-only-untagged-versions: true
+
+  deploy:
+    needs: build-and-push
+    if: github.ref == env.DEPLOY_BRANCH
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ env.CHECKOUT_FETCH_DEPTH }}
+
+      - name: Notify — deploy iniciado
+        continue-on-error: true
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          BODY=$(printf 'Step: deploy (iniciado)\nCommit: %s' "$MSG")
+          curl -sf \
+            -H "Title: ${{ env.APP_NAME }} CI — Deploy" \
+            --data-binary "$BODY" \
+            "$NTFY_URL" || true
+
+      - name: Trigger Coolify
+        run: |
+          if [ -z "$COOLIFY_DEPLOY_UUID" ] || [ -z "$COOLIFY_TOKEN" ]; then
+            echo "COOLIFY_DEPLOY_UUID ou COOLIFY_TOKEN não configurados — pulando deploy."
+            exit 0
+          fi
+          curl -sf -X GET \
+            "${COOLIFY_API_URL}?uuid=${COOLIFY_DEPLOY_UUID}&force=false" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}"
+
+      - name: Notify — deploy concluído
+        if: success()
+        continue-on-error: true
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          BODY=$(printf 'Step: deploy (Coolify disparado)\nCommit: %s' "$MSG")
+          curl -sf \
+            -H "Title: ${{ env.APP_NAME }} CI — Deploy OK" \
+            -H "Tags: white_check_mark" \
+            --data-binary "$BODY" \
+            "$NTFY_URL" || true
+
+      - name: Notify — deploy falhou
+        if: failure()
+        continue-on-error: true
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          BODY=$(printf 'Step: deploy (falhou)\nCommit: %s\nRun: %s' "$MSG" "$RUN_URL")
+          curl -sf \
+            -H "Title: ${{ env.APP_NAME }} CI — Deploy FALHOU" \
+            -H "Priority: high" \
+            -H "Tags: x" \
+            --data-binary "$BODY" \
+            "$NTFY_URL" || true
